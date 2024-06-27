@@ -1,10 +1,13 @@
 # coding: utf-8
+from typing import Union, Optional, TypeVar
 import os
 import sys
 import string
 from shlex import shlex
 from io import open
 from collections import OrderedDict
+
+T = TypeVar('T')
 
 # Useful for very coarse version differentiation.
 PYVERSION = sys.version_info
@@ -14,13 +17,16 @@ if PYVERSION >= (3, 0, 0):
     from configparser import ConfigParser, NoOptionError
     text_type = str
 else:
-    from ConfigParser import SafeConfigParser as ConfigParser, NoOptionError
-    text_type = unicode
+    from ConfigParser import (  # type: ignore
+        SafeConfigParser as ConfigParser,
+        NoOptionError
+    )
+    text_type = unicode  # type: ignore
 
 if PYVERSION >= (3, 2, 0):
-    read_config = lambda parser, file: parser.read_file(file)
+    def read_config(parser, file): return parser.read_file(file)
 else:
-    read_config = lambda parser, file: parser.readfp(file)
+    def read_config(parser, file): return parser.readfp(file)
 
 
 DEFAULT_ENCODING = 'UTF-8'
@@ -30,7 +36,22 @@ DEFAULT_ENCODING = 'UTF-8'
 TRUE_VALUES = {"y", "yes", "t", "true", "on", "1"}
 FALSE_VALUES = {"n", "no", "f", "false", "off", "0"}
 
-def strtobool(value):
+
+def strtobool(value: Union[str, bool]) -> bool:
+    """
+    Convert a string representation of truth to True or False.
+
+    True values are 'y', 'yes', 't', 'true', 'on', '1'.
+    False values are 'n', 'no', 'f', 'false', 'off', '0'.
+
+    Raises ValueError if 'value' is anything else.
+
+    Args:
+        value [str, bool]: A string representing a truth value.
+
+    Returns:
+        bool: The boolean value.
+    """
     if isinstance(value, bool):
         return value
     value = value.lower()
@@ -74,10 +95,13 @@ class Config(object):
         return bool(value) if value == '' else bool(strtobool(value))
 
     @staticmethod
-    def _cast_do_nothing(value):
+    def _cast_do_nothing(value: T) -> T:
+        """
+        Helper to convert config values to the same type.
+        """
         return value
 
-    def get(self, option, default=undefined, cast=undefined):
+    def get(self, option: str, default=undefined, cast=undefined):
         """
         Return the value for option or default if defined.
         """
@@ -89,7 +113,10 @@ class Config(object):
             value = self.repository[option]
         else:
             if isinstance(default, Undefined):
-                raise UndefinedValueError('{} not found. Declare it as envvar or define a default value.'.format(option))
+                raise UndefinedValueError(
+                    '{} not found. Declare it as envvar or define a default '
+                    'value.'.format(option)
+                )
 
             value = default
 
@@ -108,7 +135,8 @@ class Config(object):
 
 
 class RepositoryEmpty(object):
-    def __init__(self, source='', encoding=DEFAULT_ENCODING):
+    def __init__(self, source: Optional[str] = None,
+                 encoding=DEFAULT_ENCODING):
         pass
 
     def __contains__(self, key):
@@ -124,12 +152,22 @@ class RepositoryIni(RepositoryEmpty):
     """
     SECTION = 'settings'
 
-    def __init__(self, source, encoding=DEFAULT_ENCODING):
+    def __init__(self, source: str, encoding=DEFAULT_ENCODING) -> None:
+        """
+        Args:
+            source (str): The path to the .ini file.
+
+        Optional Args:
+            encoding (str): The encoding of the file. Default is 'UTF-8'.
+
+        Returns:
+            None
+        """
         self.parser = ConfigParser()
         with open(source, encoding=encoding) as file_:
             read_config(self.parser, file_)
 
-    def __contains__(self, key):
+    def __contains__(self, key: str):
         return (key in os.environ or
                 self.parser.has_option(self.SECTION, key))
 
@@ -144,7 +182,8 @@ class RepositoryEnv(RepositoryEmpty):
     """
     Retrieves option keys from .env files with fall back to os.environ.
     """
-    def __init__(self, source, encoding=DEFAULT_ENCODING):
+
+    def __init__(self, source: str, encoding=DEFAULT_ENCODING):
         self.data = {}
 
         with open(source, encoding=encoding) as file_:
@@ -206,11 +245,20 @@ class AutoConfig(object):
 
     encoding = DEFAULT_ENCODING
 
-    def __init__(self, search_path=None):
+    def __init__(self, search_path: Optional[str] = None):
         self.search_path = search_path
-        self.config = None
+        self.config = self._load(self.search_path or self._caller_path())
 
-    def _find_file(self, path):
+    def _find_file(self, path: str) -> Optional[str]:
+        """
+        Find the configuration file in the given path.
+
+        Args:
+            path (str): The path to start the search.
+
+        Returns:
+            str: The path to the configuration file.
+        """
         # look for all files in the current path
         for configfile in self.SUPPORTED:
             filename = os.path.join(path, configfile)
@@ -223,27 +271,34 @@ class AutoConfig(object):
             return self._find_file(parent)
 
         # reached root without finding any files.
-        return ''
+        return None
 
-    def _load(self, path):
+    def _load(self, path: str) -> "Config":
         # Avoid unintended permission errors
         try:
             filename = self._find_file(os.path.abspath(path))
         except Exception:
-            filename = ''
-        Repository = self.SUPPORTED.get(os.path.basename(filename), RepositoryEmpty)
+            filename = None
 
-        self.config = Config(Repository(filename, encoding=self.encoding))
+        if not filename or os.path.basename(filename) not in self.SUPPORTED:
+            return Config(RepositoryEmpty(filename,
+                                          encoding=self.encoding))
+        else:
+            Repository = self.SUPPORTED[os.path.basename(
+                filename)]  # type: ignore
 
-    def _caller_path(self):
+            return Config(Repository(filename, encoding=self.encoding))
+
+    def _caller_path(self) -> str:
         # MAGIC! Get the caller's module path.
         frame = sys._getframe()
-        path = os.path.dirname(frame.f_back.f_back.f_code.co_filename)
+        path = os.path.dirname(
+            frame.f_back.f_back.f_code.co_filename)  # type: ignore
         return path
 
     def __call__(self, *args, **kwargs):
         if not self.config:
-            self._load(self.search_path or self._caller_path())
+            self.config = self._load(self.search_path or self._caller_path())
 
         return self.config(*args, **kwargs)
 
@@ -253,6 +308,7 @@ class AutoConfig(object):
 config = AutoConfig()
 
 # Helpers
+
 
 class Csv(object):
     """
@@ -277,7 +333,7 @@ class Csv(object):
         if value is None:
             return self.post_process()
 
-        transform = lambda s: self.cast(s.strip(self.strip))
+        def transform(s): return self.cast(s.strip(self.strip))
 
         splitter = shlex(value, posix=True)
         splitter.whitespace = self.delimiter
@@ -310,7 +366,7 @@ class Choices(object):
         transform = self.cast(value)
         if transform not in self._valid_values:
             raise ValueError((
-                    'Value not in list: {!r}; valid values are {!r}'
-                ).format(value, self._valid_values))
+                'Value not in list: {!r}; valid values are {!r}'
+            ).format(value, self._valid_values))
         else:
             return transform
